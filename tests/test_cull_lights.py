@@ -67,6 +67,109 @@ class TestRejectImage:
         captured = capsys.readouterr()
         assert "REJECTED" in captured.out
 
+    @patch("ap_common.move_file")
+    def test_reject_image_dryrun_debug(self, mock_move_file, tmp_path, capsys):
+        """Test that reject_image logs debug info in dryrun mode with debug=True."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        test_file = tmp_path / "source" / "subdir" / "test.fits"
+
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("test data")
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            cull_lights.reject_image(
+                filepath=str(test_file),
+                reject_dir=reject_dir,
+                source_dir=source_dir,
+                dryrun=True,
+                debug=True,
+            )
+
+            # Verify debug logging was called
+            mock_logger.debug.assert_called_once()
+            assert "DRYRUN" in str(mock_logger.debug.call_args)
+
+    @patch("ap_common.move_file")
+    def test_reject_image_file_not_under_source(self, mock_move_file, tmp_path):
+        """Test that reject_image uses filename when file is not under source_dir."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        test_file = tmp_path / "other" / "test.fits"  # Not under source_dir
+
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("test data")
+
+        cull_lights.reject_image(
+            filepath=str(test_file),
+            reject_dir=reject_dir,
+            source_dir=source_dir,
+            dryrun=False,
+            debug=False,
+        )
+
+        # Verify move_file was called with just filename
+        mock_move_file.assert_called_once()
+        call_args = mock_move_file.call_args
+        assert "test.fits" in str(call_args[1]["to_file"])
+
+    @patch("ap_common.move_file")
+    def test_reject_image_oserror(self, mock_move_file, tmp_path, capsys):
+        """Test that reject_image handles OSError exceptions."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        test_file = tmp_path / "source" / "test.fits"
+
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("test data")
+
+        # Make move_file raise OSError
+        mock_move_file.side_effect = OSError("Permission denied")
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            with pytest.raises(OSError):
+                cull_lights.reject_image(
+                    filepath=str(test_file),
+                    reject_dir=reject_dir,
+                    source_dir=source_dir,
+                    dryrun=False,
+                    debug=False,
+                )
+
+            # Verify error was logged
+            mock_logger.error.assert_called_once()
+            captured = capsys.readouterr()
+            assert "ERROR" in captured.out
+
+    @patch("ap_common.move_file")
+    def test_reject_image_generic_exception(self, mock_move_file, tmp_path, capsys):
+        """Test that reject_image handles generic exceptions."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        test_file = tmp_path / "source" / "test.fits"
+
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("test data")
+
+        # Make move_file raise a generic exception
+        mock_move_file.side_effect = ValueError("Unexpected error")
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            with pytest.raises(ValueError):
+                cull_lights.reject_image(
+                    filepath=str(test_file),
+                    reject_dir=reject_dir,
+                    source_dir=source_dir,
+                    dryrun=False,
+                    debug=True,  # Test with debug=True for exc_info
+                )
+
+            # Verify error was logged with exc_info
+            mock_logger.error.assert_called_once()
+            assert "exc_info" in str(mock_logger.error.call_args)
+            captured = capsys.readouterr()
+            assert "ERROR" in captured.out
+
     def test_reject_image_safety_check(self, tmp_path, monkeypatch):
         """Test that reject_image raises error for invalid destination."""
         source_dir = str(tmp_path / "source")
@@ -260,32 +363,391 @@ class TestCullLights:
         # File matching skip pattern should not be processed
         mock_reject.assert_not_called()
 
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_rms_threshold(self, mock_reject, mock_get_metadata, tmp_path):
+        """Test that cull_lights processes RMS threshold correctly."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "rmsac": 3.0,  # Should be rejected (3.0 > 2.0)
+            },
+            "file2.fits": {
+                "filename": str(tmp_path / "source" / "file2.fits"),
+                "type": "LIGHT",
+                "rmsac": 1.5,  # Should pass (1.5 < 2.0)
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        with patch("builtins.input", return_value="y"):
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=None,
+                max_rms=2.0,
+                auto_yes_percent=-1,
+                debug=False,
+                dryrun=False,
+            )
+
+        # Verify reject_image was called for file1 (but not file2)
+        assert mock_reject.called
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_both_hfr_and_rms(
+        self, mock_reject, mock_get_metadata, tmp_path
+    ):
+        """Test that cull_lights handles both HFR and RMS violations."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "hfr": 3.0,  # Violates HFR
+                "rmsac": 3.0,  # Violates RMS
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        with patch("builtins.input", return_value="y"):
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=2.0,
+                auto_yes_percent=-1,
+                debug=False,
+                dryrun=False,
+            )
+
+        # Verify reject_image was called
+        assert mock_reject.called
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_non_numeric_hfr_debug(
+        self, mock_reject, mock_get_metadata, tmp_path, capsys
+    ):
+        """Test that cull_lights logs warning for non-numeric HFR when debug=True."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "hfr": "invalid",  # Non-numeric
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                auto_yes_percent=-1,
+                debug=True,
+                dryrun=False,
+            )
+
+            # Verify warning was logged
+            mock_logger.warning.assert_called()
+            assert "non-numeric HFR" in str(mock_logger.warning.call_args)
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_non_numeric_rms_debug(
+        self, mock_reject, mock_get_metadata, tmp_path
+    ):
+        """Test that cull_lights logs warning for non-numeric RMS when debug=True."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "rmsac": "invalid",  # Non-numeric
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=None,
+                max_rms=2.0,
+                auto_yes_percent=-1,
+                debug=True,
+                dryrun=False,
+            )
+
+            # Verify warning was logged
+            mock_logger.warning.assert_called()
+            assert "non-numeric RMS" in str(mock_logger.warning.call_args)
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_missing_filename(
+        self, mock_reject, mock_get_metadata, tmp_path
+    ):
+        """Test that cull_lights handles missing filename in metadata."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        # Create a file that would be rejected, but metadata is missing filename
+        # The key in the dict is the filename, but metadata.get("filename") returns None
+        mock_metadata = {
+            "file1.fits": {
+                "type": "LIGHT",
+                "hfr": 3.0,  # Would be rejected, but no "filename" in metadata value
+                # Missing "filename" key in the metadata dict value
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            # Mock input since count_reject is incremented before filename check
+            # so a prompt will occur even though rejected_files is empty
+            with patch("builtins.input", return_value="y"):
+                cull_lights.cull_lights(
+                    source_dir=source_dir,
+                    reject_dir=reject_dir,
+                    max_hfr=2.5,
+                    max_rms=None,
+                    auto_yes_percent=-1,
+                    debug=False,
+                    dryrun=False,
+                )
+
+            # Verify warning was logged
+            mock_logger.warning.assert_called()
+            assert "missing 'filename'" in str(mock_logger.warning.call_args)
+            # Verify reject_image was NOT called (skipped due to missing filename)
+            mock_reject.assert_not_called()
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_user_rejects(
+        self, mock_reject, mock_get_metadata, tmp_path, capsys
+    ):
+        """Test that cull_lights handles user rejecting the rejection (input 'n')."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "hfr": 3.0,  # Should be rejected
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        with patch("builtins.input", return_value="n"):
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                auto_yes_percent=-1,
+                debug=False,
+                dryrun=False,
+            )
+
+        # Verify reject_image was NOT called
+        mock_reject.assert_not_called()
+
+        # Verify skip message was printed
+        captured = capsys.readouterr()
+        assert "Skipping rejection" in captured.out
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_multiple_directory_groups(
+        self, mock_reject, mock_get_metadata, tmp_path
+    ):
+        """Test that cull_lights processes multiple directory groups correctly."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        # Create files in different directories
+        dir1_file = tmp_path / "source" / "dir1" / "file1.fits"
+        dir2_file = tmp_path / "source" / "dir2" / "file2.fits"
+        dir1_file.parent.mkdir(parents=True)
+        dir2_file.parent.mkdir(parents=True)
+
+        mock_metadata = {
+            "dir1/file1.fits": {
+                "filename": str(dir1_file),
+                "type": "LIGHT",
+                "hfr": 3.0,  # Should be rejected
+            },
+            "dir2/file2.fits": {
+                "filename": str(dir2_file),
+                "type": "LIGHT",
+                "hfr": 3.0,  # Should be rejected
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        with patch("builtins.input", return_value="y"):
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                auto_yes_percent=-1,
+                debug=False,
+                dryrun=False,
+            )
+
+        # Verify reject_image was called twice (once per directory group)
+        assert mock_reject.call_count == 2
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_no_rejections(
+        self, mock_reject, mock_get_metadata, tmp_path, capsys
+    ):
+        """Test that cull_lights handles case with no rejections."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "hfr": 1.5,  # Should pass (1.5 < 2.5)
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        cull_lights.cull_lights(
+            source_dir=source_dir,
+            reject_dir=reject_dir,
+            max_hfr=2.5,
+            max_rms=None,
+            auto_yes_percent=-1,
+            debug=False,
+            dryrun=False,
+        )
+
+        # Verify reject_image was NOT called
+        mock_reject.assert_not_called()
+
+        # Verify no prompt was shown (no "OK to reject" message)
+        captured = capsys.readouterr()
+        assert "OK to reject" not in captured.out
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_empty_data(
+        self, mock_reject, mock_get_metadata, tmp_path, capsys
+    ):
+        """Test that cull_lights handles empty data (no files found)."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_get_metadata.return_value = {}  # Empty data
+
+        cull_lights.cull_lights(
+            source_dir=source_dir,
+            reject_dir=reject_dir,
+            max_hfr=2.5,
+            max_rms=None,
+            auto_yes_percent=-1,
+            debug=False,
+            dryrun=False,
+        )
+
+        # Verify reject_image was NOT called
+        mock_reject.assert_not_called()
+
+        # Verify "Done" message is printed
+        captured = capsys.readouterr()
+        assert "Done" in captured.out
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_debug_logging(self, mock_reject, mock_get_metadata, tmp_path):
+        """Test that cull_lights logs debug information when debug=True."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        import re
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "hfr": 1.5,
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        skip_pattern = re.compile("accept")
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                auto_yes_percent=-1,
+                skip_pattern=skip_pattern,
+                debug=True,
+                dryrun=False,
+            )
+
+            # Verify debug logging was called for directory groups
+            debug_calls = [str(call) for call in mock_logger.debug.call_args_list]
+            assert any("directory groups" in call for call in debug_calls)
+
 
 class TestMain:
     """Tests for main function."""
 
     @patch("ap_cull_lights.cull_lights.cull_lights")
-    def test_main_calls_cull_lights(self, mock_cull):
+    def test_main_calls_cull_lights(self, mock_cull, tmp_path):
         """Test that main function calls cull_lights with correct arguments."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
         with patch(
             "sys.argv",
-            ["cull_lights.py", "/source", "/reject", "--max-hfr", "2.5"],
+            ["cull_lights.py", source_dir, reject_dir, "--max-hfr", "2.5"],
         ):
             cull_lights.main()
 
         mock_cull.assert_called_once()
         call_kwargs = mock_cull.call_args[1]
-        assert call_kwargs["source_dir"] == "/source"
-        assert call_kwargs["reject_dir"] == "/reject"
+        assert call_kwargs["source_dir"] == source_dir
+        assert call_kwargs["reject_dir"] == reject_dir
         assert call_kwargs["max_hfr"] == 2.5
         assert call_kwargs["max_rms"] is None
 
     @patch("ap_cull_lights.cull_lights.cull_lights")
-    def test_main_with_max_rms(self, mock_cull):
+    def test_main_with_max_rms(self, mock_cull, tmp_path):
         """Test main with --max-rms parameter."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
         with patch(
             "sys.argv",
-            ["cull_lights.py", "/source", "/reject", "--max-rms", "2.0"],
+            ["cull_lights.py", source_dir, reject_dir, "--max-rms", "2.0"],
         ):
             cull_lights.main()
 
@@ -294,14 +756,18 @@ class TestMain:
         assert call_kwargs["max_rms"] == 2.0
 
     @patch("ap_cull_lights.cull_lights.cull_lights")
-    def test_main_with_both_params(self, mock_cull):
+    def test_main_with_both_params(self, mock_cull, tmp_path):
         """Test main with both --max-hfr and --max-rms."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
         with patch(
             "sys.argv",
             [
                 "cull_lights.py",
-                "/source",
-                "/reject",
+                source_dir,
+                reject_dir,
                 "--max-hfr",
                 "2.5",
                 "--max-rms",
@@ -315,11 +781,15 @@ class TestMain:
         assert call_kwargs["max_rms"] == 2.0
 
     @patch("ap_cull_lights.cull_lights.cull_lights")
-    def test_main_with_debug(self, mock_cull):
+    def test_main_with_debug(self, mock_cull, tmp_path):
         """Test main with --debug flag."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
         with patch(
             "sys.argv",
-            ["cull_lights.py", "/source", "/reject", "--max-hfr", "2.5", "--debug"],
+            ["cull_lights.py", source_dir, reject_dir, "--max-hfr", "2.5", "--debug"],
         ):
             cull_lights.main()
 
@@ -327,19 +797,155 @@ class TestMain:
         assert call_kwargs["debug"] is True
 
     @patch("ap_cull_lights.cull_lights.cull_lights")
-    def test_main_with_dryrun(self, mock_cull):
+    def test_main_with_dryrun(self, mock_cull, tmp_path):
         """Test main with --dryrun flag."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
         with patch(
             "sys.argv",
-            ["cull_lights.py", "/source", "/reject", "--max-hfr", "2.5", "--dryrun"],
+            ["cull_lights.py", source_dir, reject_dir, "--max-hfr", "2.5", "--dryrun"],
         ):
             cull_lights.main()
 
         call_kwargs = mock_cull.call_args[1]
         assert call_kwargs["dryrun"] is True
 
-    def test_main_no_thresholds_error(self):
+    def test_main_no_thresholds_error(self, tmp_path):
         """Test that main raises error when no thresholds specified."""
-        with patch("sys.argv", ["cull_lights.py", "/source", "/reject"]):
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
+        with patch("sys.argv", ["cull_lights.py", source_dir, reject_dir]):
+            with pytest.raises(SystemExit):
+                cull_lights.main()
+
+    @patch("ap_cull_lights.cull_lights.cull_lights")
+    def test_main_with_skip_regex(self, mock_cull, tmp_path):
+        """Test main with --skip-regex parameter."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "cull_lights.py",
+                source_dir,
+                reject_dir,
+                "--max-hfr",
+                "2.5",
+                "--skip-regex",
+                "accept",
+            ],
+        ):
+            cull_lights.main()
+
+        call_kwargs = mock_cull.call_args[1]
+        assert call_kwargs["skip_pattern"] is not None
+        assert call_kwargs["skip_pattern"].pattern == "accept"
+
+    @patch("ap_cull_lights.cull_lights.cull_lights")
+    def test_main_with_auto_accept_percent(self, mock_cull, tmp_path):
+        """Test main with --auto-accept-percent parameter."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "cull_lights.py",
+                source_dir,
+                reject_dir,
+                "--max-hfr",
+                "2.5",
+                "--auto-accept-percent",
+                "5.0",
+            ],
+        ):
+            cull_lights.main()
+
+        call_kwargs = mock_cull.call_args[1]
+        assert call_kwargs["auto_yes_percent"] == 5.0
+
+    def test_main_invalid_auto_accept_percent(self, tmp_path):
+        """Test that main raises error for invalid auto-accept-percent."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "cull_lights.py",
+                source_dir,
+                reject_dir,
+                "--max-hfr",
+                "2.5",
+                "--auto-accept-percent",
+                "150.0",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                cull_lights.main()
+
+    def test_main_invalid_regex(self, tmp_path):
+        """Test that main raises error for invalid regex pattern."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        (tmp_path / "source").mkdir()
+
+        with patch(
+            "sys.argv",
+            [
+                "cull_lights.py",
+                source_dir,
+                reject_dir,
+                "--max-hfr",
+                "2.5",
+                "--skip-regex",
+                "[invalid",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                cull_lights.main()
+
+    def test_main_source_dir_not_exists(self, tmp_path):
+        """Test that main raises error when source directory doesn't exist."""
+        source_dir = str(tmp_path / "nonexistent")
+        reject_dir = str(tmp_path / "reject")
+
+        with patch(
+            "sys.argv",
+            ["cull_lights.py", source_dir, reject_dir, "--max-hfr", "2.5"],
+        ):
+            with pytest.raises(SystemExit):
+                cull_lights.main()
+
+    def test_main_source_not_directory(self, tmp_path):
+        """Test that main raises error when source path is not a directory."""
+        source_file = tmp_path / "source_file.txt"
+        source_file.write_text("not a directory")
+        reject_dir = str(tmp_path / "reject")
+
+        with patch(
+            "sys.argv",
+            ["cull_lights.py", str(source_file), reject_dir, "--max-hfr", "2.5"],
+        ):
+            with pytest.raises(SystemExit):
+                cull_lights.main()
+
+    def test_main_same_source_reject_dir(self, tmp_path):
+        """Test that main raises error when source and reject directories are the same."""
+        source_dir = str(tmp_path / "source")
+        (tmp_path / "source").mkdir()
+
+        with patch(
+            "sys.argv",
+            ["cull_lights.py", source_dir, source_dir, "--max-hfr", "2.5"],
+        ):
             with pytest.raises(SystemExit):
                 cull_lights.main()

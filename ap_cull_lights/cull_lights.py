@@ -76,7 +76,9 @@ def reject_image(
             dest_dir.mkdir(parents=True, exist_ok=True)
 
             # Move the file
-            ap_common.move_file(from_file=str(filepath), to_file=str(dest_path), debug=debug)
+            ap_common.move_file(
+                from_file=str(filepath), to_file=str(dest_path), debug=debug
+            )
             print(f"REJECTED: {relative_path}")
         except OSError as e:
             error_msg = f"Failed to move file {relative_path}: {e}"
@@ -114,7 +116,9 @@ def cull_lights(
         dryrun: Perform dry run without actually moving files
     """
     # Get metadata for all FITS files
-    required_properties = []  # No specific requirements, rules engine handles missing headers
+    required_properties = (
+        []
+    )  # No specific requirements, rules engine handles missing headers
     data = ap_common.get_filtered_metadata(
         dirs=[source_dir],
         patterns=[config.INPUT_PATTERN_ALL],
@@ -133,7 +137,9 @@ def cull_lights(
         # Skip files matching skip pattern
         if skip_pattern and skip_pattern.search(filename):
             if debug:
-                logger.debug(f"Skipping {filename} (matches pattern: {skip_pattern.pattern})")
+                logger.debug(
+                    f"Skipping {filename} (matches pattern: {skip_pattern.pattern})"
+                )
             continue
 
         # Get directory path (use resolved path for consistent grouping)
@@ -202,7 +208,9 @@ def cull_lights(
                 count_reject += 1
                 filename = metadata.get("filename")
                 if filename is None:
-                    logger.warning(f"Metadata missing 'filename' field, skipping rejection")
+                    logger.warning(
+                        "Metadata missing 'filename' field, skipping rejection"
+                    )
                     continue
                 rejected_files.append((filename, reasons))
 

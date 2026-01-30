@@ -13,6 +13,14 @@ This tool evaluates light frames against HFR and RMS thresholds and moves reject
 - **Auto-Accept Threshold**: Automatically accept rejections below a configurable percentage
 - **Dry Run Mode**: Test rules without actually moving files
 
+## Documentation
+
+This tool is part of the astrophotography pipeline. For comprehensive documentation including workflow guides and integration with other tools, see:
+
+- **[Pipeline Overview](https://github.com/jewzaam/ap-base/blob/main/docs/index.md)** - Full pipeline documentation
+- **[Workflow Guide](https://github.com/jewzaam/ap-base/blob/main/docs/workflow.md)** - Detailed workflow with diagrams
+- **[ap-cull-lights Reference](https://github.com/jewzaam/ap-base/blob/main/docs/tools/ap-cull-lights.md)** - Detailed reference for this tool
+
 ## Usage
 
 ### Basic Culling

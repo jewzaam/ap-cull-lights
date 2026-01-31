@@ -24,7 +24,7 @@ def reject_image(
     source_dir: str,
     dryrun: bool = False,
     debug: bool = False,
-) -> None:
+) -> bool:
     """
     Move an image to the reject directory, preserving relative directory structure.
 
@@ -34,6 +34,10 @@ def reject_image(
         source_dir: Source directory (to compute relative path)
         dryrun: If True, don't actually move the file
         debug: If True, print debug information
+
+    Returns:
+        True if the file was successfully rejected (or would be in dryrun),
+        False if an error occurred and the file was skipped.
     """
     filepath_obj = Path(filepath)
     source_path = Path(source_dir).resolve()
@@ -69,7 +73,8 @@ def reject_image(
     if dryrun:
         if debug:
             logger.debug(f"  [DRYRUN] Would move: {filepath} -> {dest_path}")
-        print(f"REJECTED: {relative_path}")
+        logger.info(f"REJECTED: {relative_path}")
+        return True
     else:
         try:
             # Create destination directory
@@ -79,17 +84,16 @@ def reject_image(
             ap_common.move_file(
                 from_file=str(filepath), to_file=str(dest_path), debug=debug
             )
-            print(f"REJECTED: {relative_path}")
+            logger.info(f"REJECTED: {relative_path}")
+            return True
         except OSError as e:
             error_msg = f"Failed to move file {relative_path}: {e}"
             logger.error(error_msg)
-            print(f"ERROR: {error_msg}")
-            raise
+            return False
         except Exception as e:
             error_msg = f"Unexpected error moving file {relative_path}: {e}"
             logger.error(error_msg, exc_info=debug)
-            print(f"ERROR: {error_msg}")
-            raise
+            return False
 
 
 def cull_lights(
@@ -119,16 +123,20 @@ def cull_lights(
     required_properties = (
         []
     )  # No specific requirements, rules engine handles missing headers
-    data = ap_common.get_filtered_metadata(
-        dirs=[source_dir],
-        patterns=[config.INPUT_PATTERN_ALL],
-        recursive=True,
-        required_properties=required_properties,
-        filters={"type": "LIGHT"},
-        debug=debug,
-        profileFromPath=True,
-        printStatus=True,
-    )
+    try:
+        data = ap_common.get_filtered_metadata(
+            dirs=[source_dir],
+            patterns=[config.INPUT_PATTERN_ALL],
+            recursive=True,
+            required_properties=required_properties,
+            filters={"type": "LIGHT"},
+            debug=debug,
+            profileFromPath=True,
+            printStatus=True,
+        )
+    except Exception as e:
+        logger.error(f"Failed to read metadata from {source_dir}: {e}", exc_info=debug)
+        raise RuntimeError(f"Failed to read metadata from source directory: {e}") from e
 
     # Group files by directory (for batch rejection confirmation)
     data_groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -205,24 +213,24 @@ def cull_lights(
                             )
 
             if should_reject:
-                count_reject += 1
                 filename = metadata.get("filename")
                 if filename is None:
                     logger.warning(
                         "Metadata missing 'filename' field, skipping rejection"
                     )
                     continue
+                count_reject += 1
                 rejected_files.append((filename, reasons))
 
         # Prompt for confirmation if there are rejections
         if count_reject > 0:
-            print("=" * 60)
+            logger.info("=" * 60)
             dir_short = directory.replace(source_dir, "").lstrip(os.sep)
-            print(f"Reject for '{dir_short}':")
+            logger.info(f"Reject for '{dir_short}':")
             for filename, reasons in rejected_files:
-                print(f"  {Path(filename).name}:")
+                logger.info(f"  {Path(filename).name}:")
                 for reason in reasons:
-                    print(f"    - {reason}")
+                    logger.info(f"    - {reason}")
 
             rejection_percent = 100 * count_reject / count_total
             question = (
@@ -232,37 +240,44 @@ def cull_lights(
 
             if auto_yes_percent >= 0 and rejection_percent < auto_yes_percent:
                 # Auto-accept if below threshold
-                print(f"{question} y (automatic, < {auto_yes_percent}%)")
+                logger.info(f"{question} y (automatic, < {auto_yes_percent}%)")
                 answer = "y"
             elif dryrun:
                 # Auto-accept in dryrun mode
-                print(f"{question} y (dryrun)")
+                logger.info(f"{question} y (dryrun)")
                 answer = "y"
             else:
                 answer = input(question).strip().lower()
 
             if answer == "y":
-                overall_count_reject += count_reject
+                successful_rejections = 0
                 for filename, reasons in rejected_files:
-                    reject_image(
+                    if reject_image(
                         filepath=filename,
                         reject_dir=reject_dir,
                         source_dir=source_dir,
                         dryrun=dryrun,
                         debug=debug,
+                    ):
+                        successful_rejections += 1
+                overall_count_reject += successful_rejections
+                if successful_rejections < len(rejected_files):
+                    failed_count = len(rejected_files) - successful_rejections
+                    logger.warning(
+                        f"Failed to reject {failed_count} file(s) in this group"
                     )
             else:
-                print("Skipping rejection for this directory group")
-            print("=" * 60)
+                logger.info("Skipping rejection for this directory group")
+            logger.info("=" * 60)
 
     # Print summary
     if overall_count_total > 0:
         overall_percent = 100 * overall_count_reject / overall_count_total
-        print(
-            f"\nTotal Rejected: {overall_count_reject} of {overall_count_total} "
+        logger.info(
+            f"Total Rejected: {overall_count_reject} of {overall_count_total} "
             f"({overall_percent:.1f}%)"
         )
-    print(f"Done with {source_dir}")
+    logger.info(f"Done with {source_dir}")
 
 
 def main() -> None:
@@ -353,6 +368,12 @@ def main() -> None:
     if source_path.resolve() == reject_path.resolve():
         parser.error(
             f"Source and reject directories cannot be the same: {args.source_dir}"
+        )
+
+    # Check if reject directory's parent exists (for early error detection)
+    if not reject_path.parent.exists():
+        parser.error(
+            f"Parent directory of reject path does not exist: {reject_path.parent}"
         )
 
     # Run culling

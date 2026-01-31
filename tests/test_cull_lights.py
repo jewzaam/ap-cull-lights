@@ -43,7 +43,7 @@ class TestRejectImage:
         assert "subdir" in str(call_args[1]["to_file"])
 
     @patch("ap_common.move_file")
-    def test_reject_image_dryrun(self, mock_move_file, tmp_path, capsys):
+    def test_reject_image_dryrun(self, mock_move_file, tmp_path):
         """Test that reject_image doesn't move file in dryrun mode."""
         source_dir = str(tmp_path / "source")
         reject_dir = str(tmp_path / "reject")
@@ -52,20 +52,24 @@ class TestRejectImage:
         test_file.parent.mkdir(parents=True)
         test_file.write_text("test data")
 
-        cull_lights.reject_image(
-            filepath=str(test_file),
-            reject_dir=reject_dir,
-            source_dir=source_dir,
-            dryrun=True,
-            debug=False,
-        )
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            result = cull_lights.reject_image(
+                filepath=str(test_file),
+                reject_dir=reject_dir,
+                source_dir=source_dir,
+                dryrun=True,
+                debug=False,
+            )
 
-        # Verify move_file was NOT called
-        mock_move_file.assert_not_called()
+            # Verify move_file was NOT called
+            mock_move_file.assert_not_called()
 
-        # Verify output
-        captured = capsys.readouterr()
-        assert "REJECTED" in captured.out
+            # Verify result is True (success in dryrun)
+            assert result is True
+
+            # Verify REJECTED was logged
+            mock_logger.info.assert_called()
+            assert "REJECTED" in str(mock_logger.info.call_args)
 
     @patch("ap_common.move_file")
     def test_reject_image_dryrun_debug(self, mock_move_file, tmp_path, capsys):
@@ -114,8 +118,8 @@ class TestRejectImage:
         assert "test.fits" in str(call_args[1]["to_file"])
 
     @patch("ap_common.move_file")
-    def test_reject_image_oserror(self, mock_move_file, tmp_path, capsys):
-        """Test that reject_image handles OSError exceptions."""
+    def test_reject_image_oserror(self, mock_move_file, tmp_path):
+        """Test that reject_image handles OSError exceptions by returning False."""
         source_dir = str(tmp_path / "source")
         reject_dir = str(tmp_path / "reject")
         test_file = tmp_path / "source" / "test.fits"
@@ -127,23 +131,23 @@ class TestRejectImage:
         mock_move_file.side_effect = OSError("Permission denied")
 
         with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
-            with pytest.raises(OSError):
-                cull_lights.reject_image(
-                    filepath=str(test_file),
-                    reject_dir=reject_dir,
-                    source_dir=source_dir,
-                    dryrun=False,
-                    debug=False,
-                )
+            result = cull_lights.reject_image(
+                filepath=str(test_file),
+                reject_dir=reject_dir,
+                source_dir=source_dir,
+                dryrun=False,
+                debug=False,
+            )
+
+            # Verify result is False (failure)
+            assert result is False
 
             # Verify error was logged
             mock_logger.error.assert_called_once()
-            captured = capsys.readouterr()
-            assert "ERROR" in captured.out
 
     @patch("ap_common.move_file")
-    def test_reject_image_generic_exception(self, mock_move_file, tmp_path, capsys):
-        """Test that reject_image handles generic exceptions."""
+    def test_reject_image_generic_exception(self, mock_move_file, tmp_path):
+        """Test that reject_image handles generic exceptions by returning False."""
         source_dir = str(tmp_path / "source")
         reject_dir = str(tmp_path / "reject")
         test_file = tmp_path / "source" / "test.fits"
@@ -155,20 +159,20 @@ class TestRejectImage:
         mock_move_file.side_effect = ValueError("Unexpected error")
 
         with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
-            with pytest.raises(ValueError):
-                cull_lights.reject_image(
-                    filepath=str(test_file),
-                    reject_dir=reject_dir,
-                    source_dir=source_dir,
-                    dryrun=False,
-                    debug=True,  # Test with debug=True for exc_info
-                )
+            result = cull_lights.reject_image(
+                filepath=str(test_file),
+                reject_dir=reject_dir,
+                source_dir=source_dir,
+                dryrun=False,
+                debug=True,  # Test with debug=True for exc_info
+            )
+
+            # Verify result is False (failure)
+            assert result is False
 
             # Verify error was logged with exc_info
             mock_logger.error.assert_called_once()
             assert "exc_info" in str(mock_logger.error.call_args)
-            captured = capsys.readouterr()
-            assert "ERROR" in captured.out
 
     def test_reject_image_safety_check(self, tmp_path, monkeypatch):
         """Test that reject_image raises error for invalid destination."""
@@ -263,7 +267,7 @@ class TestCullLights:
     @patch("ap_common.get_filtered_metadata")
     @patch("ap_cull_lights.cull_lights.reject_image")
     def test_cull_lights_auto_yes_percent(
-        self, mock_reject, mock_get_metadata, tmp_path, capsys
+        self, mock_reject, mock_get_metadata, tmp_path
     ):
         """Test that cull_lights auto-accepts when below threshold."""
         source_dir = str(tmp_path / "source")
@@ -280,24 +284,24 @@ class TestCullLights:
             }
         mock_get_metadata.return_value = mock_metadata
 
-        cull_lights.cull_lights(
-            source_dir=source_dir,
-            reject_dir=reject_dir,
-            max_hfr=2.5,
-            max_rms=None,
-            auto_yes_percent=5.0,  # Auto-accept if < 5%
-            debug=False,
-            dryrun=False,
-        )
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                auto_yes_percent=5.0,  # Auto-accept if < 5%
+                debug=False,
+                dryrun=False,
+            )
 
-        # Verify auto-accept message
-        captured = capsys.readouterr()
-        assert "automatic" in captured.out.lower()
-        assert "y (automatic" in captured.out
+            # Verify auto-accept message was logged
+            info_calls = [str(call) for call in mock_logger.info.call_args_list]
+            assert any("automatic" in call.lower() for call in info_calls)
 
     @patch("ap_common.get_filtered_metadata")
     @patch("ap_cull_lights.cull_lights.reject_image")
-    def test_cull_lights_dryrun(self, mock_reject, mock_get_metadata, tmp_path, capsys):
+    def test_cull_lights_dryrun(self, mock_reject, mock_get_metadata, tmp_path):
         """Test that cull_lights works in dryrun mode."""
         source_dir = str(tmp_path / "source")
         reject_dir = str(tmp_path / "reject")
@@ -311,19 +315,20 @@ class TestCullLights:
         }
         mock_get_metadata.return_value = mock_metadata
 
-        cull_lights.cull_lights(
-            source_dir=source_dir,
-            reject_dir=reject_dir,
-            max_hfr=2.5,
-            max_rms=None,
-            auto_yes_percent=-1,
-            debug=False,
-            dryrun=True,
-        )
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                auto_yes_percent=-1,
+                debug=False,
+                dryrun=True,
+            )
 
-        # Verify dryrun message
-        captured = capsys.readouterr()
-        assert "dryrun" in captured.out.lower()
+            # Verify dryrun message was logged
+            info_calls = [str(call) for call in mock_logger.info.call_args_list]
+            assert any("dryrun" in call.lower() for call in info_calls)
 
     @patch("ap_common.get_filtered_metadata")
     @patch("ap_cull_lights.cull_lights.reject_image")
@@ -539,9 +544,7 @@ class TestCullLights:
 
     @patch("ap_common.get_filtered_metadata")
     @patch("ap_cull_lights.cull_lights.reject_image")
-    def test_cull_lights_user_rejects(
-        self, mock_reject, mock_get_metadata, tmp_path, capsys
-    ):
+    def test_cull_lights_user_rejects(self, mock_reject, mock_get_metadata, tmp_path):
         """Test that cull_lights handles user rejecting the rejection (input 'n')."""
         source_dir = str(tmp_path / "source")
         reject_dir = str(tmp_path / "reject")
@@ -555,23 +558,24 @@ class TestCullLights:
         }
         mock_get_metadata.return_value = mock_metadata
 
-        with patch("builtins.input", return_value="n"):
-            cull_lights.cull_lights(
-                source_dir=source_dir,
-                reject_dir=reject_dir,
-                max_hfr=2.5,
-                max_rms=None,
-                auto_yes_percent=-1,
-                debug=False,
-                dryrun=False,
-            )
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            with patch("builtins.input", return_value="n"):
+                cull_lights.cull_lights(
+                    source_dir=source_dir,
+                    reject_dir=reject_dir,
+                    max_hfr=2.5,
+                    max_rms=None,
+                    auto_yes_percent=-1,
+                    debug=False,
+                    dryrun=False,
+                )
 
-        # Verify reject_image was NOT called
-        mock_reject.assert_not_called()
+            # Verify reject_image was NOT called
+            mock_reject.assert_not_called()
 
-        # Verify skip message was printed
-        captured = capsys.readouterr()
-        assert "Skipping rejection" in captured.out
+            # Verify skip message was logged
+            info_calls = [str(call) for call in mock_logger.info.call_args_list]
+            assert any("Skipping rejection" in call for call in info_calls)
 
     @patch("ap_common.get_filtered_metadata")
     @patch("ap_cull_lights.cull_lights.reject_image")
@@ -653,31 +657,30 @@ class TestCullLights:
 
     @patch("ap_common.get_filtered_metadata")
     @patch("ap_cull_lights.cull_lights.reject_image")
-    def test_cull_lights_empty_data(
-        self, mock_reject, mock_get_metadata, tmp_path, capsys
-    ):
+    def test_cull_lights_empty_data(self, mock_reject, mock_get_metadata, tmp_path):
         """Test that cull_lights handles empty data (no files found)."""
         source_dir = str(tmp_path / "source")
         reject_dir = str(tmp_path / "reject")
 
         mock_get_metadata.return_value = {}  # Empty data
 
-        cull_lights.cull_lights(
-            source_dir=source_dir,
-            reject_dir=reject_dir,
-            max_hfr=2.5,
-            max_rms=None,
-            auto_yes_percent=-1,
-            debug=False,
-            dryrun=False,
-        )
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                auto_yes_percent=-1,
+                debug=False,
+                dryrun=False,
+            )
 
-        # Verify reject_image was NOT called
-        mock_reject.assert_not_called()
+            # Verify reject_image was NOT called
+            mock_reject.assert_not_called()
 
-        # Verify "Done" message is printed
-        captured = capsys.readouterr()
-        assert "Done" in captured.out
+            # Verify "Done" message was logged
+            info_calls = [str(call) for call in mock_logger.info.call_args_list]
+            assert any("Done" in call for call in info_calls)
 
     @patch("ap_common.get_filtered_metadata")
     @patch("ap_cull_lights.cull_lights.reject_image")
@@ -949,3 +952,109 @@ class TestMain:
         ):
             with pytest.raises(SystemExit):
                 cull_lights.main()
+
+    def test_main_reject_dir_parent_not_exists(self, tmp_path):
+        """Test that main raises error when reject directory parent doesn't exist."""
+        source_dir = str(tmp_path / "source")
+        (tmp_path / "source").mkdir()
+        # reject_dir parent doesn't exist
+        reject_dir = str(tmp_path / "nonexistent" / "reject")
+
+        with patch(
+            "sys.argv",
+            ["cull_lights.py", source_dir, reject_dir, "--max-hfr", "2.5"],
+        ):
+            with pytest.raises(SystemExit):
+                cull_lights.main()
+
+
+class TestCullLightsErrorHandling:
+    """Tests for error handling in cull_lights function."""
+
+    @patch("ap_common.get_filtered_metadata")
+    def test_cull_lights_metadata_error(self, mock_get_metadata, tmp_path):
+        """Test that cull_lights raises RuntimeError when metadata fetch fails."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        # Make get_filtered_metadata raise an exception
+        mock_get_metadata.side_effect = Exception("Connection failed")
+
+        with pytest.raises(RuntimeError, match="Failed to read metadata"):
+            cull_lights.cull_lights(
+                source_dir=source_dir,
+                reject_dir=reject_dir,
+                max_hfr=2.5,
+                max_rms=None,
+                debug=False,
+                dryrun=False,
+            )
+
+    @patch("ap_common.get_filtered_metadata")
+    @patch("ap_cull_lights.cull_lights.reject_image")
+    def test_cull_lights_partial_rejection_failure(
+        self, mock_reject, mock_get_metadata, tmp_path
+    ):
+        """Test that cull_lights continues processing when some rejections fail."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+
+        mock_metadata = {
+            "file1.fits": {
+                "filename": str(tmp_path / "source" / "file1.fits"),
+                "type": "LIGHT",
+                "hfr": 3.0,  # Should be rejected
+            },
+            "file2.fits": {
+                "filename": str(tmp_path / "source" / "file2.fits"),
+                "type": "LIGHT",
+                "hfr": 3.0,  # Should be rejected
+            },
+        }
+        mock_get_metadata.return_value = mock_metadata
+
+        # First rejection fails, second succeeds
+        mock_reject.side_effect = [False, True]
+
+        with patch("ap_cull_lights.cull_lights.logger") as mock_logger:
+            with patch("builtins.input", return_value="y"):
+                cull_lights.cull_lights(
+                    source_dir=source_dir,
+                    reject_dir=reject_dir,
+                    max_hfr=2.5,
+                    max_rms=None,
+                    debug=False,
+                    dryrun=False,
+                )
+
+            # Verify both rejections were attempted
+            assert mock_reject.call_count == 2
+
+            # Verify warning about failed rejections was logged
+            warning_calls = [str(call) for call in mock_logger.warning.call_args_list]
+            assert any("Failed to reject" in call for call in warning_calls)
+
+
+class TestRejectImageReturnValue:
+    """Tests for reject_image return value."""
+
+    @patch("ap_common.move_file")
+    def test_reject_image_returns_true_on_success(self, mock_move_file, tmp_path):
+        """Test that reject_image returns True on successful move."""
+        source_dir = str(tmp_path / "source")
+        reject_dir = str(tmp_path / "reject")
+        test_file = tmp_path / "source" / "test.fits"
+
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("test data")
+
+        result = cull_lights.reject_image(
+            filepath=str(test_file),
+            reject_dir=reject_dir,
+            source_dir=source_dir,
+            dryrun=False,
+            debug=False,
+        )
+
+        assert result is True
+        mock_move_file.assert_called_once()

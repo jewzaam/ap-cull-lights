@@ -116,7 +116,7 @@ def cull_lights(
         dryrun: Perform dry run without actually moving files
     """
     # Get metadata for all FITS files
-    required_properties = (
+    required_properties: list[str] = (
         []
     )  # No specific requirements, rules engine handles missing headers
     data = ap_common.get_filtered_metadata(
